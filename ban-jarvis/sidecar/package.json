@@ -1,0 +1,20 @@
+{
+  "name": "sidecar",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "body-parser": "^2.2.1",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "open": "^11.0.0",
+    "puppeteer": "^24.31.0",
+    "shelljs": "^0.10.0"
+  }
+}
