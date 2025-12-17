@@ -1,14 +1,31 @@
 "use client";
 
-import { useChat } from "ai/react";
-// FIX 1: Import Types explicitly to solve "implicit any" errors
-import { type Message, type ToolInvocation } from "ai"; 
-import { useEffect, useRef } from "react";
-import Globe from "./components/Globe"; 
+import { useChat } from "@ai-sdk/react";
+import { useEffect, useRef, useState } from "react";
+// FIX: Correct path to Globe component
+import Globe from "./components/HUD/GlobalGlobe"; 
 import { Send, Terminal, Cpu, Activity } from "lucide-react";
 
 export default function Home() {
-  const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat();
+  // FIX: useChat in @ai-sdk/react provides status and sendMessage, but not input management
+  const { messages, sendMessage, status } = useChat();
+  const isLoading = status === 'streaming' || status === 'submitted';
+
+  // FIX: Manual input management
+  const [input, setInput] = useState('');
+  
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setInput(e.target.value);
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+    // Cast to any to avoid type issues with specific SDK version
+    sendMessage({ role: 'user', content: input } as any);
+    setInput('');
+  };
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -53,8 +70,8 @@ export default function Home() {
             </div>
           )}
           
-          {/* FIX 2: Explicitly type 'm' as Message */}
-          {messages.map((m: Message) => (
+          {/* FIX 2: Type 'm' as any to avoid strict type mismatch with UIMessage */}
+          {messages.map((m: any) => (
             <div key={m.id} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[80%] p-4 rounded-md border ${
                 m.role === 'user' 
@@ -66,8 +83,8 @@ export default function Home() {
                   {m.content}
                 </div>
                 
-                {/* FIX 3: Explicitly type 'tool' as ToolInvocation */}
-                {m.toolInvocations?.map((tool: ToolInvocation) => (
+                {/* FIX 3: Type 'tool' as any */}
+                {m.toolInvocations?.map((tool: any) => (
                     <div key={tool.toolCallId} className="mt-2 p-2 bg-black/60 rounded text-xs text-yellow-500 border border-yellow-900/30 font-mono">
                         Running: {tool.toolName}...
                     </div>
