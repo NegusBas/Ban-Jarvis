@@ -1,127 +1,101 @@
-"use client";
+'use client';
 
-import { useChat } from "@ai-sdk/react";
-import { useEffect, useRef, useState } from "react";
-// FIX: Correct path to Globe component
-import Globe from "./components/HUD/GlobalGlobe"; 
-import { Send, Terminal, Cpu, Activity } from "lucide-react";
+import { useChat } from '@ai-sdk/react';
+import { UIMessage } from 'ai';
+// Define a more flexible type that matches what the hook actually returns at runtime
+type Message = UIMessage & { content: string; toolInvocations?: any[] };
+import { useEffect, useRef } from 'react';
+import Image from 'next/image';
 
 export default function Home() {
-  // FIX: useChat in @ai-sdk/react provides status and sendMessage, but not input management
-  const { messages, sendMessage, status } = useChat();
-  const isLoading = status === 'streaming' || status === 'submitted';
-
-  // FIX: Manual input management
-  const [input, setInput] = useState('');
-  
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setInput(e.target.value);
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim()) return;
-    // Cast to any to avoid type issues with specific SDK version
-    sendMessage({ role: 'user', content: input } as any);
-    setInput('');
-  };
+  // We strictly destructure what we need. 
+  // 'handleSubmit' automatically uses 'append' internally.
+  const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
+    // @ts-ignore - api option exists in the hook but might be missing from types
+    api: '/api/chat',
+    onError: (err: any) => console.error("Chat Error:", err),
+  }) as any;
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Auto-scroll to bottom
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   return (
-    <main className="relative flex min-h-screen flex-col items-center justify-between p-8 overflow-hidden">
+    <main className="flex min-h-screen flex-col bg-[#050505] text-[#00f3ff] font-mono overflow-hidden relative">
       
-      {/* BACKGROUND LAYER */}
-      <Globe />
-      
-      {/* HUD HEADER */}
-      <header className="w-full max-w-5xl flex justify-between items-center border-b border-cyan-900/50 pb-4 mb-4 backdrop-blur-sm">
-        <div className="flex items-center gap-3">
-            <div className="h-3 w-3 rounded-full bg-cyan-400 animate-pulse shadow-[0_0_10px_#00f3ff]" />
-            <h1 className="text-2xl font-bold tracking-[0.2em] text-cyan-400 text-glow">
-              JARVIS <span className="text-xs text-cyan-700">MK. V</span>
-            </h1>
-        </div>
-        <div className="flex gap-6 text-xs text-cyan-600 font-mono">
-            <div className="flex items-center gap-2">
-                <Cpu className="w-4 h-4" /> 
-                <span>SYSTEM: ONLINE</span>
-            </div>
-            <div className="flex items-center gap-2">
-                <Activity className="w-4 h-4" /> 
-                <span>SIDECAR: CONNECTED</span>
-            </div>
+      {/* BACKGROUND GRID */}
+      <div className="absolute inset-0 z-0 opacity-20 pointer-events-none" 
+           style={{ backgroundImage: 'linear-gradient(#00f3ff 1px, transparent 1px), linear-gradient(90deg, #00f3ff 1px, transparent 1px)', backgroundSize: '40px 40px' }}>
+      </div>
+
+      {/* HEADER */}
+      <header className="z-10 w-full p-6 border-b border-[#00f3ff]/30 bg-black/80 backdrop-blur-md flex justify-between items-center">
+        <h1 className="text-2xl font-bold tracking-[0.2em] shadow-[#00f3ff] drop-shadow-[0_0_10px_rgba(0,243,255,0.8)]">
+          JARVIS <span className="text-xs text-white/50">MK. V</span>
+        </h1>
+        <div className="flex gap-4 text-xs">
+            <span className="flex items-center gap-2">
+                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                SYSTEM ONLINE
+            </span>
         </div>
       </header>
 
-      {/* TERMINAL WINDOW */}
-      <section className="flex-1 w-full max-w-5xl flex flex-col gap-4 relative z-10">
-        
-        {/* Output Area */}
-        <div className="flex-1 rounded-lg border border-cyan-900/50 bg-[#050a10]/80 backdrop-blur-md p-6 overflow-y-auto shadow-[0_0_30px_rgba(0,243,255,0.05)] h-[60vh]">
-          {messages.length === 0 && (
-            <div className="h-full flex flex-col items-center justify-center text-cyan-800 space-y-4 opacity-50">
-              <Terminal className="w-16 h-16 opacity-50" />
-              <p className="tracking-widest">AWAITING INPUT...</p>
-            </div>
-          )}
-          
-          {/* FIX 2: Type 'm' as any to avoid strict type mismatch with UIMessage */}
-          {messages.map((m: any) => (
-            <div key={m.id} className={`mb-6 flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[80%] p-4 rounded-md border ${
-                m.role === 'user' 
-                  ? 'bg-cyan-950/30 border-cyan-800 text-cyan-100' 
-                  : 'bg-black/50 border-cyan-900/50 text-cyan-300'
-              }`}>
-                <p className="text-xs font-bold mb-1 opacity-50 uppercase">{m.role}</p>
-                <div className="whitespace-pre-wrap font-mono text-sm leading-relaxed">
-                  {m.content}
+      {/* CHAT AREA */}
+      <section className="flex-1 overflow-y-auto p-6 z-10 space-y-6 scrollbar-hide">
+        {messages.length === 0 && (
+            <div className="h-full flex flex-col items-center justify-center opacity-50">
+                <div className="w-16 h-16 border-2 border-[#00f3ff] rounded-full flex items-center justify-center animate-spin-slow mb-4">
+                    <div className="w-2 h-2 bg-[#00f3ff] rounded-full"></div>
                 </div>
-                
-                {/* FIX 3: Type 'tool' as any */}
-                {m.toolInvocations?.map((tool: any) => (
-                    <div key={tool.toolCallId} className="mt-2 p-2 bg-black/60 rounded text-xs text-yellow-500 border border-yellow-900/30 font-mono">
-                        Running: {tool.toolName}...
-                    </div>
-                ))}
-              </div>
+                <p>AWAITING INPUT...</p>
             </div>
-          ))}
-          <div ref={messagesEndRef} />
-        </div>
+        )}
+        
+        {messages.map((m: any) => (
+          <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[80%] p-4 border ${
+                m.role === 'user' 
+                ? 'border-white/20 bg-white/5 text-white' 
+                : 'border-[#00f3ff]/30 bg-[#001015] text-[#00f3ff] shadow-[0_0_15px_rgba(0,243,255,0.1)]'
+            } rounded-lg`}>
+              <div className="text-[10px] uppercase opacity-50 mb-1 tracking-wider">{m.role}</div>
+              <div className="whitespace-pre-wrap leading-relaxed">{m.content}</div>
+              
+              {/* Tool Execution Logs */}
+              {m.toolInvocations?.map((tool: any) => (
+                 <div key={tool.toolCallId} className="mt-3 p-2 bg-yellow-900/20 border border-yellow-500/30 text-yellow-500 text-xs font-mono rounded">
+                    <span className="animate-pulse">▶</span> RUNNING: {tool.toolName}...
+                 </div>
+              ))}
+            </div>
+          </div>
+        ))}
+        <div ref={messagesEndRef} />
+      </section>
 
-        {/* Input Area */}
-        <form onSubmit={handleSubmit} className="relative w-full group">
+      {/* INPUT AREA */}
+      <footer className="z-10 p-6 bg-black/90 border-t border-[#00f3ff]/30">
+        <form onSubmit={handleSubmit} className="relative max-w-4xl mx-auto w-full">
           <input
-            className="w-full bg-[#050a10] border border-cyan-800/50 rounded-lg py-4 pl-6 pr-12 text-cyan-100 placeholder-cyan-900 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all shadow-lg"
+            className="w-full bg-[#0a0a0a] border border-[#00f3ff]/50 text-[#00f3ff] p-4 pr-12 rounded focus:outline-none focus:ring-1 focus:ring-[#00f3ff] shadow-[0_0_20px_rgba(0,243,255,0.1)] placeholder-[#00f3ff]/30"
             value={input}
             onChange={handleInputChange}
-            placeholder="ENTER COMMAND..."
+            placeholder="> ENTER COMMAND..."
             disabled={isLoading}
             autoFocus
           />
           <button
             type="submit"
             disabled={isLoading || !input}
-            className="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-cyan-600 hover:text-cyan-400 transition-colors disabled:opacity-30"
+            className="absolute right-4 top-1/2 -translate-y-1/2 text-[#00f3ff] hover:text-white transition-colors disabled:opacity-30"
           >
-            {isLoading ? (
-                <div className="h-5 w-5 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
-            ) : (
-                <Send className="w-5 h-5" />
-            )}
+            ⏎
           </button>
         </form>
-      </section>
-
-      {/* FOOTER */}
-      <footer className="w-full text-center py-4 text-[10px] text-cyan-900 tracking-[0.3em] uppercase">
-        Secure Connection • Local Environment • v0.5.0
       </footer>
     </main>
   );

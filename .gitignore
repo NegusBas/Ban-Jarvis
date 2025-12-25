@@ -3,3 +3,10 @@ node_modules
 .env
 dist
 build
+.env
+venv/
+__pycache__/
+*.mp3
+*.docx
+*.xlsx
+.DS_Store
