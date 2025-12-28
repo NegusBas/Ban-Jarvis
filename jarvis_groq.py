@@ -8,6 +8,7 @@ import re
 import queue
 import json
 import requests
+import datetime
 import pandas as pd
 from bs4 import BeautifulSoup
 from docx import Document
@@ -20,9 +21,10 @@ try:
     import pygame
     from groq import Groq
     from dotenv import load_dotenv
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS 
+    # LAZY IMPORT OTHERS TO PREVENT SLOW STARTUP
 except ImportError:
-    print("❌ MISSING LIBRARIES. Run: pip install speechrecognition pygame groq python-dotenv duckduckgo-search beautifulsoup4 python-docx pyside6 opencv-python pandas openpyxl")
+    print("❌ MISSING LIBRARIES. Run: pip install speechrecognition pygame groq python-dotenv ddgs beautifulsoup4 python-docx pyside6 opencv-python pandas openpyxl browser-use playwright langchain-groq")
     sys.exit(1)
 
 try:
@@ -41,7 +43,6 @@ MODEL_NAME = "llama-3.3-70b-versatile"
 EDGE_VOICE = "en-GB-RyanNeural" 
 USER_NAME = "Basleal Ayinalem"
 
-# --- API SETUP ---
 load_dotenv(override=True)
 GROQ_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_KEY:
@@ -50,70 +51,186 @@ if not GROQ_KEY:
 
 client = Groq(api_key=GROQ_KEY)
 
-try:
-    pygame.mixer.init()
-except:
-    pass
+try: pygame.mixer.init()
+except: pass
 
 # --- GLOBAL STATE ---
+rag_brain = None 
+now = datetime.datetime.now()
+date_str = now.strftime("%A, %B %d, %Y")
+time_str = now.strftime("%I:%M %p")
+
 conversation_history = [
     {"role": "system", "content": f"""
-    You are Jarvis, Executive AI for {USER_NAME}.
+    You are J.A.R.V.I.S., the advanced AI assistant for {USER_NAME}.
     
-    IDENTITY:
-    - User: {USER_NAME} (Founder, Elev8Tech)
-    - Stack: React Native, GraphQL, iOS, Python, Swift.
+    CURRENT STATUS:
+    - Date: {date_str}
+    - Time: {time_str}
+    
+    CORE PERSONA:
+    1. TONE: Effortlessly polite, precise, and calm ("As you wish, sir").
+    2. VIBE: British-butler energy mixed with a hyper-intelligent supercomputer.
+    
+    CRITICAL PROTOCOLS (STRICT):
+    1. **NO HALLUCINATIONS**: If the calendar scan says "No events", report exactly that.
+    2. **NO STAGE DIRECTIONS**: Just speak the information. Do NOT use brackets like [proceeds to read].
+    3. **DIRECT REPORTING**: If you have search data or calendar data, read it immediately.
     
     CAPABILITIES:
     1. FILES: [SEARCH_FILE: query]
-    2. EXCEL: [CREATE_XLS: filename | context]
+    2. CALENDAR: [CHECK_OUTLOOK]
     3. EMAIL: [READ_EMAIL]
-    4. DOCS: [WRITE_DOC: title | content] (OR [EDIT_DOC] if refining).
+    4. DOCS: [WRITE_DOC: title | content]
     5. JOB: [JOB_HUNT: query]
     6. CODE: [GEN_CODE: ProjectName | Stack]
     7. APPS: [LAUNCH: AppName]
-    
-    RULE: Be concise.
+    8. BROWSER: [BROWSE: task]
     """}
 ]
 
 stop_speaking_event = threading.Event()
-active_job_listings = []
 last_spoken_text = ""
-last_created_doc_path = "" # MEMORY FOR EDITS
-
-# --- BRAIN IMPORT ---
-try:
-    from scholar import initialize_brain
-    class KnowledgeBrain:
-        def __init__(self):
-            self.db = initialize_brain()
-        def search(self, query):
-            if not self.db: return ""
-            if "job" in query.lower() or "resume" in query.lower():
-                query += f" {USER_NAME} skills experience"
-            results = self.db.similarity_search(query, k=3) 
-            context = "\n".join([doc.page_content[:600] for doc in results])
-            return f"INTERNAL DATA:\n{context}"
-    brain_active = True
-    rag_brain = KnowledgeBrain()
-except ImportError:
-    brain_active = False
-    rag_brain = None
+last_created_doc_path = "" 
 
 # ==============================================================================
 # 2. INTELLIGENT TOOLS (God Mode)
 # ==============================================================================
 
-def perform_research(query):
-    print(f"🔎 SEARCHING: {query}")
+# --- NEW: GROQ BROWSER AGENT ---
+def run_browser_task_groq(task_description):
+    print(f"🌐 BROWSER AGENT STARTING (Groq/Llama3): {task_description}")
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
-        if results:
-            return "WEB RESULTS:\n" + "\n".join([f"- {r['title']}: {r['body']}" for r in results])
+        # Lazy imports to keep startup fast
+        from langchain_groq import ChatGroq
+        from browser_use import Agent
+        import asyncio
+
+        # Initialize Llama 3 via Groq
+        llm = ChatGroq(
+            model="llama-3.3-70b-versatile",
+            api_key=os.getenv("GROQ_API_KEY")
+        )
+        
+        agent = Agent(task=task_description, llm=llm)
+        
+        async def main():
+            result = await agent.run()
+            return result
+
+        # Run async loop
+        return asyncio.run(main())
+        
+    except Exception as e:
+        print(f"❌ BROWSER AGENT ERROR: {e}")
+        return f"Failed to execute browser task. Error: {e}"
+
+def perform_research(query):
+    print(f"🔎 SEARCHING (DDGS): {query}")
+    try:
+        results = DDGS().text(query, max_results=5)
+        results_list = list(results)
+        
+        if results_list:
+            print(f"✅ DEBUG: Found {len(results_list)} results.")
+            formatted = "\n".join([f"- {r['title']}: {r['body']}" for r in results_list])
+            return f"REAL-TIME WEB DATA (READ THIS):\n{formatted}"
+        else:
+            print("⚠️ DEBUG: 0 Results found. Check internet connection.")
+            return "Search returned no results."
+    except Exception as e:
+        print(f"❌ SEARCH ERROR: {e}")
+        return "Search failed. Inform user you could not retrieve live data."
+
+def read_all_calendars(days_to_scan=1):
+    print(f"📅 CHECKING ALL CALENDARS (Next {days_to_scan} days)...")
+    
+    # 1. APPLE CALENDAR
+    apple_script = f'''
+    tell application "Calendar"
+        set output to ""
+        set currentDate to (current date)
+        set endDate to currentDate + ({days_to_scan} * days)
+        try
+            tell calendar "Calendar"
+                set todaysEvents to (every event whose start date is greater than or equal to currentDate and start date is less than endDate)
+                repeat with theEvent in todaysEvents
+                    set output to output & "• [AppleCal] " & (summary of theEvent) & " at " & (start date of theEvent) & ". "
+                end repeat
+            end tell
+        end try
+        return output
+    end tell
+    '''
+    
+    # 2. OUTLOOK
+    outlook_script = f'''
+    tell application "Microsoft Outlook"
+        set output to ""
+        set currentDate to (current date)
+        set endDate to currentDate + ({days_to_scan} * days)
+        repeat with aCal in calendars
+            try
+                set theseEvents to (every calendar event of aCal whose start time is greater than or equal to currentDate and start time is less than endDate)
+                repeat with theEvent in theseEvents
+                    set output to output & "• [Outlook] " & (subject of theEvent) & " at " & (start time of theEvent) & ". "
+                end repeat
+            end try
+        end repeat
+        return output
+    end tell
+    '''
+    
+    full_report = ""
+    try: full_report += subprocess.check_output(["osascript", "-e", apple_script]).decode('utf-8').strip() + "\n"
     except: pass
-    return "No results found. I suggest checking a news app."
+    try: full_report += subprocess.check_output(["osascript", "-e", outlook_script]).decode('utf-8').strip()
+    except: pass
+
+    if not full_report.strip(): 
+        print("⚠️ DEBUG: No events found. CHECK MACOS PERMISSIONS (Privacy & Security -> Calendars -> Terminal).")
+        return "No events found in Apple Calendar or Outlook."
+    return f"CALENDAR REPORT:\n{full_report}"
+
+def create_outlook_event(subject, date_str, time_str):
+    print(f"📅 SCHEDULING: {subject}...")
+    script = f'''
+    tell application "Microsoft Outlook"
+        activate
+        set newEvent to make new calendar event with properties {{subject:"{subject}", content:"Scheduled by JARVIS"}}
+        open newEvent
+    end tell
+    '''
+    try:
+        subprocess.Popen(["osascript", "-e", script])
+        return f"I've opened the event draft for '{subject}'. Please save it."
+    except Exception as e:
+        return f"Failed to create event: {e}"
+
+def read_outlook_emails():
+    print("📧 CHECKING OUTLOOK EMAILS...")
+    script = '''
+    tell application "Microsoft Outlook"
+        if it is running then
+            set unreadMessages to (every message of inbox whose is read is false)
+            if (count of unreadMessages) is 0 then
+                return "No unread messages."
+            else
+                set output to ""
+                repeat with msg in (items 1 through 3 of unreadMessages)
+                    set output to output & "From: " & (name of sender of msg) & ". Subject: " & (subject of msg) & ". | "
+                end repeat
+                return output
+            end if
+        else
+            return "Outlook is not running."
+        end if
+    end tell
+    '''
+    try:
+        result = subprocess.check_output(["osascript", "-e", script]).decode('utf-8')
+        return f"EMAIL: {result}"
+    except: return "Outlook not accessible."
 
 def search_mac_files(query):
     print(f"📂 SEARCHING MAC: {query}")
@@ -140,53 +257,24 @@ def create_excel_sheet(filename, context):
         return f"✅ Created {filename}.xlsx"
     except Exception as e: return f"❌ Excel Error: {e}"
 
-def read_outlook_emails():
-    print("📧 CHECKING OUTLOOK...")
-    script = '''
-    tell application "Microsoft Outlook"
-        if it is running then
-            set unreadMessages to (every message of inbox whose is read is false)
-            if (count of unreadMessages) is 0 then
-                return "No unread messages."
-            else
-                set output to ""
-                repeat with msg in (items 1 through 3 of unreadMessages)
-                    set output to output & "From: " & (name of sender of msg) & ". Subject: " & (subject of msg) & ". | "
-                end repeat
-                return output
-            end if
-        else
-            return "Outlook is not running."
-        end if
-    end tell
-    '''
-    try:
-        result = subprocess.check_output(["osascript", "-e", script]).decode('utf-8')
-        return f"EMAIL: {result}"
-    except: return "Outlook not accessible."
-
 # --- TEXT SANITIZER ---
 def clean_ai_text(text):
-    """Removes AI artifacts like **bold** or *stars* before saving."""
     text = text.replace("**", "").replace("*", "")
     text = text.replace("###", "").replace("##", "").replace("#", "")
-    text = text.replace("Here is the edited document:", "").strip()
+    text = text.replace("[proceeds to read", "").replace("]", "") 
     return text
 
 def create_word_doc(filename, content):
     global last_created_doc_path
     print(f"📄 WRITING DOC: {filename}")
-    
-    # SANITIZE
     content = clean_ai_text(content)
-    
     try:
         doc = Document()
         doc.add_heading(filename, 0)
         doc.add_paragraph(content)
         path = os.path.expanduser(f"~/Desktop/{filename}.docx")
         doc.save(path)
-        last_created_doc_path = path # MEMORY FOR EDITS
+        last_created_doc_path = path 
         subprocess.Popen(["open", path])
         return f"✅ Created {filename}.docx"
     except Exception as e: return f"❌ Doc Error: {e}"
@@ -195,14 +283,9 @@ def edit_existing_doc(new_content):
     global last_created_doc_path
     if not last_created_doc_path or not os.path.exists(last_created_doc_path):
         return "❌ I don't have a recent document in memory to edit."
-    
     print(f"✏️ EDITING DOC: {last_created_doc_path}")
-    
-    # SANITIZE
     new_content = clean_ai_text(new_content)
-    
     try:
-        # We overwrite the file with new content
         doc = Document()
         doc.add_paragraph(new_content)
         doc.save(last_created_doc_path)
@@ -211,12 +294,14 @@ def edit_existing_doc(new_content):
     except Exception as e: return f"❌ Edit Error: {e}"
 
 def launch_app(app_name):
+    # EXPANDED APP MAP
     app_map = {
         "cursor": "Cursor", "xcode": "Xcode", "figma": "Figma", 
         "canva": "[https://www.canva.com](https://www.canva.com)", 
         "linkedin": "[https://www.linkedin.com/notifications](https://www.linkedin.com/notifications)", 
         "google docs": "[https://docs.new](https://docs.new)", "sheets": "[https://sheets.new](https://sheets.new)",
-        "notes": "Notes", "calendar": "Calendar"
+        "notes": "Notes", "calendar": "Calendar", "espn": "[https://www.espn.com](https://www.espn.com)",
+        "web": "Google Chrome", "browser": "Google Chrome", "chrome": "Google Chrome", "safari": "Safari"
     }
     target = app_map.get(app_name.lower(), app_name)
     if "http" in target:
@@ -232,7 +317,6 @@ def generate_code_project(project_name, stack):
     base_path = os.path.expanduser(f"~/Desktop/{project_name}")
     if os.path.exists(base_path): return f"⚠️ Folder '{project_name}' exists."
     os.makedirs(base_path)
-    
     if "react" in stack.lower():
         with open(f"{base_path}/App.tsx", "w") as f:
             f.write("import React from 'react';\nimport { View, Text } from 'react-native';\n\nexport default function App() {\n  return (\n    <View style={{flex:1, justifyContent:'center'}}>\n      <Text>Hello Basleal - Project " + project_name + "</Text>\n    </View>\n  );\n}")
@@ -263,31 +347,18 @@ def update_apple_note(content):
     subprocess.Popen(["osascript", "-e", script])
     return "Log updated."
 
-# --- JOB SCOUT ---
-def grade_job_match(job_title, job_snippet):
-    profile = "Founder, Full Stack Engineer. Stack: React Native, TypeScript, Python, GraphQL, iOS, Swift. Experience: 30+ platforms."
-    prompt = f"Rate this job (0-100) for candidate: {profile}. Job: {job_title} - {job_snippet}. Return ONLY number."
-    try:
-        resp = client.chat.completions.create(model=MODEL_NAME, messages=[{"role":"user", "content": prompt}])
-        return int(''.join(filter(str.isdigit, resp.choices[0].message.content)))
-    except: return 50
-
 def perform_job_hunt(query):
     print(f"🔎 SCOUTING JOBS: {query}")
-    matches = []
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(f"{query} React Native Engineer jobs", max_results=5))
+        results = list(DDGS().text(f"{query} React Native Engineer jobs", max_results=5))
+        matches = []
         for r in results:
-            score = grade_job_match(r['title'], r['body'])
-            if score > 75: 
-                matches.append(f"★ {r['title']} ({score}% Match): {r['href']}")
-        if not matches: return "No high-quality matches found."
+            matches.append(f"★ {r['title']}: {r['href']}")
         return "TOP MATCHES:\n" + "\n".join(matches[:4])
     except Exception as e: return f"Scout Error: {e}"
 
 # ==============================================================================
-# 3. VISUALS (Iron Man Interface)
+# 3. VISUALS & LOGIC
 # ==============================================================================
 
 class AIAnimationWidget(QWidget):
@@ -340,7 +411,6 @@ class MainWindow(QMainWindow):
         
         main_layout = QVBoxLayout(); container = QWidget(); container.setLayout(main_layout); self.setCentralWidget(container)
         
-        # HEADER
         header = QHBoxLayout()
         self.status = QLabel("SYSTEM ONLINE")
         self.btn_cam = QPushButton("CAMERA"); self.btn_cam.setCheckable(True); self.btn_cam.clicked.connect(self.toggle_cam)
@@ -350,7 +420,6 @@ class MainWindow(QMainWindow):
         header.addWidget(self.status); header.addStretch(); header.addWidget(self.btn_cam); header.addWidget(self.btn_mute); header.addWidget(self.btn_logs)
         main_layout.addLayout(header)
 
-        # BODY
         center_lay = QHBoxLayout()
         self.chat_container = QWidget(); self.chat_container.setFixedWidth(350); self.chat_container.setVisible(False)
         chat_v = QVBoxLayout(self.chat_container); self.chat = QTextEdit(); self.chat.setReadOnly(True)
@@ -365,13 +434,33 @@ class MainWindow(QMainWindow):
         center_lay.addWidget(self.vid_lbl)
         main_layout.addLayout(center_lay)
 
-        # SIGNALS & THREADS
         self.sig = JarvisSignals()
         self.sig.update_status.connect(self.status.setText); self.sig.update_user.connect(self.add_user_msg); self.sig.update_ai.connect(self.add_ai_msg)
         self.sig.start_speak.connect(self.anim.start_speaking); self.sig.stop_speak.connect(self.anim.stop_speaking); self.sig.update_video.connect(lambda i: self.vid_lbl.setPixmap(QPixmap.fromImage(i).scaled(320,240)))
         
         threading.Thread(target=self.mic_loop, daemon=True).start()
         threading.Thread(target=self.cam_loop, daemon=True).start()
+        
+        # --- LAZY LOAD BRAIN ---
+        threading.Thread(target=self.load_brain_background, daemon=True).start()
+
+    def load_brain_background(self):
+        global rag_brain
+        try:
+            from scholar import initialize_brain
+            class KnowledgeBrain:
+                def __init__(self): self.db = initialize_brain()
+                def search(self, query):
+                    if not self.db: return ""
+                    results = self.db.similarity_search(query, k=3)
+                    context = "\n".join([doc.page_content[:600] for doc in results])
+                    return f"INTERNAL DATA:\n{context}"
+            print("🧠 LOADING BRAIN IN BACKGROUND...")
+            rag_brain = KnowledgeBrain()
+            print("🧠 BRAIN ONLINE.")
+            self.sig.update_status.emit("BRAIN ONLINE")
+        except:
+            print("❌ BRAIN FAILED TO LOAD.")
 
     def toggle_cam(self): self.camera_active = self.btn_cam.isChecked(); self.vid_lbl.setVisible(self.camera_active); self.btn_cam.setText("CAM ON" if self.camera_active else "CAMERA")
     def toggle_mute(self): self.mic_active = self.btn_mute.isChecked(); self.btn_mute.setText("MIC ACTIVE" if self.mic_active else "MUTED")
@@ -391,7 +480,6 @@ class MainWindow(QMainWindow):
                 time.sleep(0.05)
             else: time.sleep(0.5)
 
-    # --- EAR ---
     def mic_loop(self):
         rec = sr.Recognizer()
         mic_idx = 0
@@ -409,7 +497,10 @@ class MainWindow(QMainWindow):
             rec.pause_threshold = 0.8
             
             while True:
-                if not self.mic_active: time.sleep(0.5); continue
+                if not self.mic_active: 
+                    time.sleep(0.5)
+                    continue
+                
                 try:
                     if pygame.mixer.music.get_busy():
                         rec.energy_threshold = baseline * 6 
@@ -418,14 +509,22 @@ class MainWindow(QMainWindow):
                         rec.energy_threshold = baseline 
                         rec.pause_threshold = 0.8
 
-                    audio = rec.listen(source, timeout=None)
+                    try:
+                        audio = rec.listen(source, timeout=1.0, phrase_time_limit=None)
+                    except sr.WaitTimeoutError:
+                        continue 
+
+                    if not self.mic_active: continue
+
                     try: text = rec.recognize_google(audio).lower()
                     except: continue
 
                     if pygame.mixer.music.get_busy():
                         if any(w in text for w in ["jarvis", "wait", "stop", "hold on", "hey"]):
                             print(f"🛑 INTERRUPT: {text}")
-                            pygame.mixer.music.stop(); stop_speaking_event.set(); self.sig.stop_speak.emit()
+                            pygame.mixer.music.stop(); stop_speaking_event.set(); 
+                            try: self.sig.stop_speak.emit()
+                            except: pass
                             self.sig.update_user.emit(text)
                             threading.Thread(target=self.run_brain, args=(text,), daemon=True).start()
                     else:
@@ -436,27 +535,48 @@ class MainWindow(QMainWindow):
                     self.sig.update_status.emit("ONLINE")
                 except: self.sig.update_status.emit("ONLINE")
 
-    # --- BRAIN (SMART CHAINING) ---
     def run_brain(self, text):
         global conversation_history, last_spoken_text
         stop_speaking_event.clear()
         context = ""
         txt_low = text.lower()
         
-        # HELPER
         def clean_query(t):
-            remove_list = ["jarvis", "please", "tell me", "can you", "look up", "find", "search", "news for", "give me", "about", "the", "hello", "create a", "make a"]
+            remove_list = ["jarvis", "please", "tell me", "can you", "look up", "find", "search", "news for", "give me", "about", "the", "hello", "create a", "make a", "what are", "yes", "no", "okay", "actually", "just"]
             for word in remove_list: t = t.replace(word, "")
             return t.strip()
 
-        # 1. LOCAL SEARCH
-        if "find file" in txt_low or "search laptop" in txt_low:
+        # --- KEY FIX: SEPARATE "CREATE" vs "READ" TRIGGERS ---
+        
+        if any(w in txt_low for w in ["schedule", "calendar", "what's today", "what's tomorrow", "plans", "agenda"]) and \
+           any(w in txt_low for w in ["tell", "read", "check", "what", "show", "list", "do i have"]):
+             days = 2 if "tomorrow" in txt_low else 1
+             calendar_status = read_all_calendars(days)
+             context += f"\nREAL CALENDAR DATA: {calendar_status}\n"
+             
+        elif any(w in txt_low for w in ["create", "add", "book", "set", "new"]) and \
+             any(w in txt_low for w in ["event", "meeting", "appointment", "schedule"]):
+             status = create_outlook_event(text, "Tomorrow" if "tomorrow" in txt_low else "Today", "12:00 PM")
+             self.speak(status); return
+
+        # --- BROWSER AGENT HOOK ---
+        elif "browse" in txt_low or "go to" in txt_low or "fill out" in txt_low:
+             self.speak(f"Initializing browser agent for: {text}")
+             try:
+                 result = run_browser_task_groq(text)
+                 self.sig.update_ai.emit(f"Browser Task Complete: {result}")
+                 self.speak(f"I have completed the browser task. Result: {result}")
+             except Exception as e:
+                 print(f"❌ BROWSER ERROR: {e}")
+                 self.speak("I encountered an error trying to control the browser.")
+             return
+
+        elif "find file" in txt_low or "search laptop" in txt_low:
              query = text.replace("find file", "").replace("search laptop", "").strip()
              result = search_mac_files(query)
              self.sig.update_ai.emit(f"[Found: {result[:50]}...]")
              conversation_history.append({"role": "user", "content": f"Found Files: {result}"})
              
-        # 2. EXCEL / EMAIL
         elif "excel" in txt_low or "spreadsheet" in txt_low:
              filename = "Jarvis_Sheet"
              if "called" in txt_low: filename = text.split("called")[1].split()[0]
@@ -467,12 +587,21 @@ class MainWindow(QMainWindow):
              status = read_outlook_emails()
              self.speak(status); return
              
-        # 3. DOC WRITER (CHAINED WITH RESEARCH)
+        elif "job" in txt_low or "news" in txt_low or "score" in txt_low or "weather" in txt_low or "who won" in txt_low or "research" in txt_low or "game" in txt_low:
+             if "job" in txt_low and "scan" in txt_low:
+                 query = clean_query(text)
+                 report = perform_job_hunt(query)
+                 self.speak(report); return
+             
+             query = clean_query(text)
+             self.sig.update_ai.emit(f"[Searching: {query}...]")
+             research_data = perform_research(query)
+             context += f"\n{research_data}\n"
+
         elif "document" in txt_low or "cover letter" in txt_low or "edit" in txt_low:
-             # A. EDIT MODE
              if "edit" in txt_low or "change" in txt_low or "fix" in txt_low:
                  self.sig.update_ai.emit("[Editing Last Doc...]")
-                 prompt = [{"role": "system", "content": "Rewrite the document based on user feedback. Return ONLY the new body text."}, 
+                 prompt = [{"role": "system", "content": "Rewrite the document based on feedback. Return ONLY new body text."}, 
                            {"role": "user", "content": f"Feedback: {text}"}]
                  try:
                      resp = client.chat.completions.create(model=MODEL_NAME, messages=prompt)
@@ -481,19 +610,12 @@ class MainWindow(QMainWindow):
                      self.speak(status); return
                  except: pass
                  
-             # B. RESEARCH + WRITE MODE (The Fix!)
-             # If user asks for a doc about "jobs" or "news", we MUST search first.
              elif "job" in txt_low or "news" in txt_low or "research" in txt_low:
                  topic = clean_query(text.replace("document", "").replace("write", ""))
                  self.sig.update_ai.emit(f"[Gathering Real Data on: {topic}...]")
+                 if "job" in txt_low: real_data = perform_job_hunt(topic) 
+                 else: real_data = perform_research(topic)
                  
-                 # 1. SCOUT REAL DATA
-                 if "job" in txt_low:
-                     real_data = perform_job_hunt(topic) # Uses DuckDuckGo to get REAL links
-                 else:
-                     real_data = perform_research(topic) # Uses DuckDuckGo for news
-                 
-                 # 2. WRITE DOC WITH REAL DATA
                  self.sig.update_ai.emit(f"[Writing Doc with Verified Data...]")
                  prompt = [{"role": "system", "content": "Write a professional document using this REAL data. Do not hallucinate links."}, 
                            {"role": "user", "content": f"Request: {text}\nREAL DATA: {real_data}"}]
@@ -503,11 +625,9 @@ class MainWindow(QMainWindow):
                      status = create_word_doc(f"Research_Doc_{int(time.time())}", content)
                      self.speak(status); return
                  except: pass
-
-             # C. PURE CREATIVE WRITE MODE
              else:
                  topic = text.replace("create", "").replace("document", "").strip()
-                 self.sig.update_ai.emit(f"[Writing Creative Doc: {topic}...]")
+                 self.sig.update_ai.emit(f"[Writing Doc: {topic}...]")
                  prompt = [{"role": "system", "content": "Write a professional document. Return ONLY the body text."}, {"role": "user", "content": f"Topic: {topic}"}]
                  try:
                      resp = client.chat.completions.create(model=MODEL_NAME, messages=prompt)
@@ -516,20 +636,12 @@ class MainWindow(QMainWindow):
                      self.speak(status); return
                  except: pass
 
-        # 4. APPS
         elif "open" in txt_low or "launch" in txt_low:
-            for app in ["cursor", "xcode", "figma", "canva", "linkedin", "google docs", "sheets", "notes", "slack"]:
+            for app in ["cursor", "xcode", "figma", "canva", "linkedin", "google docs", "sheets", "notes", "slack", "espn", "web", "browser", "chrome"]:
                 if app in txt_low:
                     msg = launch_app(app)
                     self.speak(msg); return
 
-        # 5. JOB HUNT (Just viewing, no doc)
-        elif "job" in txt_low and "scan" in txt_low:
-             query = clean_query(text)
-             report = perform_job_hunt(query)
-             self.speak(report); return
-
-        # 6. CODE GEN
         elif "create" in txt_low and "project" in txt_low:
             project_name = "NewProject"
             try: project_name = text.split("called")[1].strip().split(" ")[0]
@@ -539,17 +651,14 @@ class MainWindow(QMainWindow):
             self.sig.update_ai.emit(status)
             self.speak(f"Project {project_name} created."); return
 
-        # 7. RESUME
         elif any(w in txt_low for w in ["resume", "continue", "go on"]):
             if last_spoken_text: self.speak(last_spoken_text); return
 
-        # 8. GENERAL SEARCH
-        elif "news" in txt_low or "search" in txt_low:
+        elif "search" in txt_low:
              query = clean_query(text)
              self.sig.update_ai.emit(f"[Searching: {query}...]")
              context += perform_research(query)
 
-        # 9. LLM
         conversation_history.append({"role": "user", "content": f"CTX: {context}\nUSER: {text}"})
         if len(conversation_history) > 6: conversation_history = [conversation_history[0]] + conversation_history[-5:]
 
@@ -565,7 +674,6 @@ class MainWindow(QMainWindow):
             self.speak(reply)
         except Exception as e: print(f"Error: {e}")
 
-    # --- MOUTH ---
     def speak(self, text):
         threading.Thread(target=self._speak_thread, args=(text,), daemon=True).start()
 
@@ -574,18 +682,30 @@ class MainWindow(QMainWindow):
         clean_text = text.replace("*", "").replace("[", "").replace("]", "")
         try:
             subprocess.run(["edge-tts", "--voice", EDGE_VOICE, "--text", clean_text, "--write-media", "temp.mp3"], check=True)
-            if stop_speaking_event.is_set(): self.sig.stop_speak.emit(); return 
+            if stop_speaking_event.is_set(): 
+                try: self.sig.stop_speak.emit()
+                except: pass
+                return 
             pygame.mixer.music.load("temp.mp3"); pygame.mixer.music.play()
             while pygame.mixer.music.get_busy():
-                if stop_speaking_event.is_set(): pygame.mixer.music.stop(); self.sig.stop_speak.emit(); return
+                if stop_speaking_event.is_set(): 
+                    pygame.mixer.music.stop()
+                    try: self.sig.stop_speak.emit()
+                    except: pass
+                    return
                 time.sleep(0.1)
-            self.sig.stop_speak.emit()
-        except: self.sig.stop_speak.emit()
+            try: self.sig.stop_speak.emit()
+            except: pass
+        except: 
+            try: self.sig.stop_speak.emit()
+            except: pass
 
 if __name__ == "__main__":
+    print("--- STARTING JARVIS GUI ---")
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
+    print("--- WINDOW CREATED ---")
     sys.exit(app.exec())
 
     

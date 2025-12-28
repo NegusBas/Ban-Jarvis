@@ -1,0 +1,617 @@
+import sys
+import os
+import time
+import math
+import threading
+import subprocess
+import re
+import queue
+import json
+import requests
+import pandas as pd
+from bs4 import BeautifulSoup
+from docx import Document
+
+# --- 1. SETUP & IMPORTS ---
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+try:
+    import speech_recognition as sr
+    import pygame
+    from groq import Groq
+    from dotenv import load_dotenv
+    from duckduckgo_search import DDGS
+except ImportError:
+    print("❌ MISSING LIBRARIES.")
+    sys.exit(1)
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+# --- GUI IMPORTS ---
+from PySide6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QLabel,
+                               QVBoxLayout, QWidget, QHBoxLayout, QPushButton, QSizePolicy)
+from PySide6.QtCore import QObject, Signal, Qt, QTimer
+from PySide6.QtGui import (QImage, QPixmap, QPainter, QColor, QBrush, QVector3D, QMatrix4x4)
+
+# --- CONFIGURATION ---
+MODEL_NAME = "llama-3.3-70b-versatile"
+EDGE_VOICE = "en-GB-RyanNeural" 
+USER_NAME = "Basleal Ayinalem"
+
+load_dotenv(override=True)
+GROQ_KEY = os.getenv("GROQ_API_KEY")
+client = Groq(api_key=GROQ_KEY)
+
+try: pygame.mixer.init()
+except: pass
+
+# --- GLOBAL STATE ---
+conversation_history = [
+    {"role": "system", "content": f"""
+    You are J.A.R.V.I.S., the advanced AI assistant for {USER_NAME}.
+    
+    CORE PERSONA:
+    1. TONE: Effortlessly polite, precise, and calm ("As you wish, sir").
+    2. VIBE: British-butler energy mixed with a hyper-intelligent supercomputer.
+    
+    CRITICAL PROTOCOLS (STRICT):
+    1. **NO HALLUCINATIONS**: Do NOT invent meetings. If the Outlook scan says "No events", report that.
+    2. **NO STAGE DIRECTIONS**: Just speak the information.
+    3. **DIRECT REPORTING**: If you have search data or calendar data, read it immediately.
+    
+    CAPABILITIES:
+    1. FILES: [SEARCH_FILE: query]
+    2. CALENDAR: [CHECK_OUTLOOK]
+    3. EMAIL: [READ_EMAIL]
+    4. DOCS: [WRITE_DOC: title | content]
+    5. JOB: [JOB_HUNT: query]
+    6. CODE: [GEN_CODE: ProjectName | Stack]
+    7. APPS: [LAUNCH: AppName]
+    """}
+]
+
+stop_speaking_event = threading.Event()
+active_job_listings = []
+last_spoken_text = ""
+last_created_doc_path = "" 
+
+# --- BRAIN IMPORT ---
+try:
+    from scholar import initialize_brain
+    class KnowledgeBrain:
+        def __init__(self):
+            self.db = initialize_brain()
+        def search(self, query):
+            if not self.db: return ""
+            if "job" in query.lower() or "resume" in query.lower():
+                query += f" {USER_NAME} skills experience"
+            results = self.db.similarity_search(query, k=3) 
+            context = "\n".join([doc.page_content[:600] for doc in results])
+            return f"INTERNAL DATA:\n{context}"
+    brain_active = True
+    rag_brain = KnowledgeBrain()
+except ImportError:
+    brain_active = False
+    rag_brain = None
+
+# ==============================================================================
+# 2. INTELLIGENT TOOLS (God Mode)
+# ==============================================================================
+
+def perform_research(query):
+    print(f"🔎 SEARCHING: {query}")
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+        if results:
+            return "REAL-TIME WEB DATA (READ THIS ALOUD):\n" + "\n".join([f"- {r['title']}: {r['body']}" for r in results])
+    except: pass
+    return "Search failed. Inform user you could not retrieve live data."
+
+# --- NEW: NATIVE OUTLOOK CALENDAR CHECKER ---
+def read_outlook_calendar():
+    print("📅 CHECKING OUTLOOK DESKTOP APP...")
+    script = '''
+    tell application "Microsoft Outlook"
+        set output to ""
+        -- Get today's start and end
+        set todayStart to (current date)
+        set time of todayStart to 0
+        set todayEnd to todayStart + (1 * days)
+        
+        -- Check ALL calendars in Outlook
+        set allEvents to {}
+        repeat with aCal in calendars
+            try
+                set theseEvents to (every calendar event of aCal whose start time is greater than or equal to todayStart and start time is less than todayEnd)
+                set allEvents to allEvents & theseEvents
+            end try
+        end repeat
+        
+        if (count of allEvents) is 0 then
+            return "No events scheduled today across any Outlook accounts."
+        end if
+        
+        repeat with theEvent in allEvents
+            set output to output & (subject of theEvent) & " at " & (time string of (start time of theEvent)) & ". "
+        end repeat
+        return output
+    end tell
+    '''
+    try:
+        result = subprocess.check_output(["osascript", "-e", script]).decode('utf-8')
+        if not result.strip(): return "No events found in Outlook today."
+        return f"OUTLOOK CALENDAR: {result}"
+    except: return "Could not access Outlook. Please make sure the app is open."
+
+def read_outlook_emails():
+    print("📧 CHECKING OUTLOOK...")
+    script = '''
+    tell application "Microsoft Outlook"
+        if it is running then
+            set unreadMessages to (every message of inbox whose is read is false)
+            if (count of unreadMessages) is 0 then
+                return "No unread messages."
+            else
+                set output to ""
+                repeat with msg in (items 1 through 3 of unreadMessages)
+                    set output to output & "From: " & (name of sender of msg) & ". Subject: " & (subject of msg) & ". | "
+                end repeat
+                return output
+            end if
+        else
+            return "Outlook is not running."
+        end if
+    end tell
+    '''
+    try:
+        result = subprocess.check_output(["osascript", "-e", script]).decode('utf-8')
+        return f"EMAIL: {result}"
+    except: return "Outlook not accessible."
+
+def search_mac_files(query):
+    print(f"📂 SEARCHING MAC: {query}")
+    try:
+        cmd = ["mdfind", "-name", query]
+        result = subprocess.check_output(cmd).decode('utf-8')
+        files = result.split('\n')[:5] 
+        if not files or files == ['']: return "No local files found."
+        return "FOUND LOCAL FILES:\n" + "\n".join(files)
+    except Exception as e: return f"Error: {e}"
+
+def create_excel_sheet(filename, context):
+    print(f"📊 CREATING EXCEL: {filename}")
+    try:
+        prompt = f"Generate a JSON list of dictionaries for a spreadsheet about: {context}. Return ONLY valid JSON."
+        resp = client.chat.completions.create(model=MODEL_NAME, messages=[{"role":"user", "content": prompt}])
+        json_str = resp.choices[0].message.content
+        if "```json" in json_str: json_str = json_str.split("```json")[1].split("```")[0]
+        data = json.loads(json_str)
+        df = pd.DataFrame(data)
+        path = os.path.expanduser(f"~/Desktop/{filename}.xlsx")
+        df.to_excel(path, index=False)
+        subprocess.Popen(["open", path])
+        return f"✅ Created {filename}.xlsx"
+    except Exception as e: return f"❌ Excel Error: {e}"
+
+# --- TEXT SANITIZER ---
+def clean_ai_text(text):
+    text = text.replace("**", "").replace("*", "")
+    text = text.replace("###", "").replace("##", "").replace("#", "")
+    text = text.replace("[proceeds to read", "").replace("]", "") 
+    return text
+
+def create_word_doc(filename, content):
+    global last_created_doc_path
+    print(f"📄 WRITING DOC: {filename}")
+    content = clean_ai_text(content)
+    try:
+        doc = Document()
+        doc.add_heading(filename, 0)
+        doc.add_paragraph(content)
+        path = os.path.expanduser(f"~/Desktop/{filename}.docx")
+        doc.save(path)
+        last_created_doc_path = path 
+        subprocess.Popen(["open", path])
+        return f"✅ Created {filename}.docx"
+    except Exception as e: return f"❌ Doc Error: {e}"
+
+def edit_existing_doc(new_content):
+    global last_created_doc_path
+    if not last_created_doc_path or not os.path.exists(last_created_doc_path):
+        return "❌ I don't have a recent document in memory to edit."
+    print(f"✏️ EDITING DOC: {last_created_doc_path}")
+    new_content = clean_ai_text(new_content)
+    try:
+        doc = Document()
+        doc.add_paragraph(new_content)
+        doc.save(last_created_doc_path)
+        subprocess.Popen(["open", last_created_doc_path])
+        return f"✅ Updated the document."
+    except Exception as e: return f"❌ Edit Error: {e}"
+
+def launch_app(app_name):
+    app_map = {
+        "cursor": "Cursor", "xcode": "Xcode", "figma": "Figma", 
+        "canva": "[https://www.canva.com](https://www.canva.com)", 
+        "linkedin": "[https://www.linkedin.com/notifications](https://www.linkedin.com/notifications)", 
+        "google docs": "[https://docs.new](https://docs.new)", "sheets": "[https://sheets.new](https://sheets.new)",
+        "notes": "Notes", "calendar": "Calendar", "espn": "[https://www.espn.com](https://www.espn.com)"
+    }
+    target = app_map.get(app_name.lower(), app_name)
+    if "http" in target:
+        subprocess.Popen(["open", target])
+        return f"Opened {app_name}."
+    try:
+        subprocess.Popen(["open", "-a", target]) 
+        return f"Opened {target}."
+    except: return f"Could not open {target}."
+
+def generate_code_project(project_name, stack):
+    print(f"💻 GENERATING PROJECT: {project_name} ({stack})")
+    base_path = os.path.expanduser(f"~/Desktop/{project_name}")
+    if os.path.exists(base_path): return f"⚠️ Folder '{project_name}' exists."
+    os.makedirs(base_path)
+    if "react" in stack.lower():
+        with open(f"{base_path}/App.tsx", "w") as f:
+            f.write("import React from 'react';\nimport { View, Text } from 'react-native';\n\nexport default function App() {\n  return (\n    <View style={{flex:1, justifyContent:'center'}}>\n      <Text>Hello Basleal - Project " + project_name + "</Text>\n    </View>\n  );\n}")
+        subprocess.Popen(["open", "-a", "Cursor", base_path])
+        return f"✅ React Native project created."
+    elif "swift" in stack.lower():
+        with open(f"{base_path}/ContentView.swift", "w") as f:
+            f.write('import SwiftUI\n\nstruct ContentView: View {\n    var body: some View {\n        Text("Hello Basleal")\n    }\n}')
+        subprocess.Popen(["open", "-a", "Xcode", base_path])
+        return f"✅ Swift project created."
+    return "✅ Project folder created."
+
+def update_apple_note(content):
+    safe_content = content.replace('"', '\\"').replace("'", "")
+    script = f'''
+    tell application "Notes"
+        activate
+        tell account "iCloud"
+            try
+                set targetNote to note "Jarvis Daily Log"
+                set body of targetNote to (body of targetNote) & "<br><br>" & "{safe_content}"
+            on error
+                make new note with properties {{name: "Jarvis Daily Log", body: "<b>JARVIS DAILY LOG</b><br><hr><br>{safe_content}"}}
+            end try
+        end tell
+    end tell
+    '''
+    subprocess.Popen(["osascript", "-e", script])
+    return "Log updated."
+
+# --- JOB SCOUT ---
+def grade_job_match(job_title, job_snippet):
+    profile = "Founder, Full Stack Engineer. Stack: React Native, TypeScript, Python, GraphQL, iOS, Swift. Experience: 30+ platforms."
+    prompt = f"Rate this job (0-100) for candidate: {profile}. Job: {job_title} - {job_snippet}. Return ONLY number."
+    try:
+        resp = client.chat.completions.create(model=MODEL_NAME, messages=[{"role":"user", "content": prompt}])
+        return int(''.join(filter(str.isdigit, resp.choices[0].message.content)))
+    except: return 50
+
+def perform_job_hunt(query):
+    print(f"🔎 SCOUTING JOBS: {query}")
+    matches = []
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(f"{query} React Native Engineer jobs", max_results=5))
+        for r in results:
+            score = grade_job_match(r['title'], r['body'])
+            if score > 75: 
+                matches.append(f"★ {r['title']} ({score}% Match): {r['href']}")
+        if not matches: return "No high-quality matches found."
+        return "TOP MATCHES:\n" + "\n".join(matches[:4])
+    except Exception as e: return f"Scout Error: {e}"
+
+# ==============================================================================
+# 3. VISUALS (Iron Man Interface)
+# ==============================================================================
+
+class AIAnimationWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.angle_y = 0; self.pulse_angle = 0; self.is_speaking = False
+        self.sphere_points = self.create_points()
+        self.timer = QTimer(self); self.timer.timeout.connect(self.update_anim); self.timer.start(40) 
+
+    def start_speaking(self): self.is_speaking = True
+    def stop_speaking(self): self.is_speaking = False; self.pulse_angle = 0; self.update()
+
+    def create_points(self):
+        points = []
+        for i in range(21):
+            lat = math.pi * (-0.5 + i / 20); y = 80 * math.sin(lat); r = 80 * math.cos(lat)
+            for j in range(40):
+                lon = 2 * math.pi * (j / 40); points.append(QVector3D(r * math.cos(lon), y, r * math.sin(lon)))
+        return points
+
+    def update_anim(self):
+        self.angle_y += 1.5 if self.is_speaking else 0.5
+        if self.is_speaking: self.pulse_angle += 0.2
+        if self.angle_y >= 360: self.angle_y = 0
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing); p.translate(self.width()/2, self.height()/2)
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(0, 255, 255, 20))); p.drawEllipse(-120, -120, 240, 240)
+        rot = QMatrix4x4(); rot.rotate(self.angle_y, 0, 1, 0); rot.rotate(15, 1, 0, 0)
+        pulse = (1 + math.sin(self.pulse_angle)) * 0.1 if self.is_speaking else 0
+        for pt in self.sphere_points:
+            rpt = rot.map(pt); scale = 200 / (200 + rpt.z())
+            alpha = int(50 + 205 * ((rpt.z() + 70) / 140)); alpha = max(0, min(255, alpha))
+            p.setBrush(QBrush(QColor(0, 255, 255, alpha)))
+            size = int(2 + ((rpt.z() + 70) / 140) * 3)
+            p.drawEllipse(int(rpt.x() * scale * (1 + pulse)), int(rpt.y() * scale * (1 + pulse)), size, size)
+
+class JarvisSignals(QObject):
+    update_status = Signal(str); update_user = Signal(str); update_ai = Signal(str)
+    start_speak = Signal(); stop_speak = Signal(); update_video = Signal(QImage)
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__(); self.setWindowTitle("JARVIS | Elev8Tech"); self.resize(1000, 600)
+        self.setStyleSheet("QMainWindow { background: #050505; } QLabel { color: #00ffcc; font: bold 14px 'Menlo'; } QTextEdit { background: #0f0f0f; color: #00ffcc; border: 1px solid #333; }")
+        
+        self.camera_active = False
+        self.mic_active = True
+        
+        main_layout = QVBoxLayout(); container = QWidget(); container.setLayout(main_layout); self.setCentralWidget(container)
+        
+        # HEADER
+        header = QHBoxLayout()
+        self.status = QLabel("SYSTEM ONLINE")
+        self.btn_cam = QPushButton("CAMERA"); self.btn_cam.setCheckable(True); self.btn_cam.clicked.connect(self.toggle_cam)
+        self.btn_mute = QPushButton("MIC ACTIVE"); self.btn_mute.setCheckable(True); self.btn_mute.setChecked(True); self.btn_mute.clicked.connect(self.toggle_mute)
+        self.btn_logs = QPushButton("LOGS"); self.btn_logs.setCheckable(True); self.btn_logs.clicked.connect(self.toggle_logs)
+        for b in [self.btn_cam, self.btn_mute, self.btn_logs]: b.setStyleSheet("color: white; border: 1px solid #333; padding: 5px;")
+        header.addWidget(self.status); header.addStretch(); header.addWidget(self.btn_cam); header.addWidget(self.btn_mute); header.addWidget(self.btn_logs)
+        main_layout.addLayout(header)
+
+        # BODY
+        center_lay = QHBoxLayout()
+        self.chat_container = QWidget(); self.chat_container.setFixedWidth(350); self.chat_container.setVisible(False)
+        chat_v = QVBoxLayout(self.chat_container); self.chat = QTextEdit(); self.chat.setReadOnly(True)
+        chat_v.addWidget(self.chat); chat_v.setContentsMargins(0,0,0,0)
+        center_lay.addWidget(self.chat_container)
+        
+        self.anim = AIAnimationWidget()
+        self.anim.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        center_lay.addWidget(self.anim)
+        
+        self.vid_lbl = QLabel(); self.vid_lbl.setFixedSize(320, 240); self.vid_lbl.setStyleSheet("background: black; border: 1px solid #333;"); self.vid_lbl.setVisible(False)
+        center_lay.addWidget(self.vid_lbl)
+        main_layout.addLayout(center_lay)
+
+        # SIGNALS & THREADS
+        self.sig = JarvisSignals()
+        self.sig.update_status.connect(self.status.setText); self.sig.update_user.connect(self.add_user_msg); self.sig.update_ai.connect(self.add_ai_msg)
+        self.sig.start_speak.connect(self.anim.start_speaking); self.sig.stop_speak.connect(self.anim.stop_speaking); self.sig.update_video.connect(lambda i: self.vid_lbl.setPixmap(QPixmap.fromImage(i).scaled(320,240)))
+        
+        threading.Thread(target=self.mic_loop, daemon=True).start()
+        threading.Thread(target=self.cam_loop, daemon=True).start()
+
+    def toggle_cam(self): self.camera_active = self.btn_cam.isChecked(); self.vid_lbl.setVisible(self.camera_active); self.btn_cam.setText("CAM ON" if self.camera_active else "CAMERA")
+    def toggle_mute(self): self.mic_active = self.btn_mute.isChecked(); self.btn_mute.setText("MIC ACTIVE" if self.mic_active else "MUTED")
+    def toggle_logs(self): self.chat_container.setVisible(self.btn_logs.isChecked())
+    def add_user_msg(self, t): self.chat.append(f"\n👤 {t}")
+    def add_ai_msg(self, t): self.chat.append(f"🤖 {t}")
+
+    def cam_loop(self):
+        if cv2 is None: return
+        cap = cv2.VideoCapture(0)
+        while True:
+            if self.camera_active:
+                ret, frame = cap.read()
+                if ret: 
+                    img = QImage(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).data, frame.shape[1], frame.shape[0], frame.shape[1]*3, QImage.Format_RGB888)
+                    self.sig.update_video.emit(img)
+                time.sleep(0.05)
+            else: time.sleep(0.5)
+
+    # --- EAR ---
+    def mic_loop(self):
+        rec = sr.Recognizer()
+        mic_idx = 0
+        mic_list = sr.Microphone.list_microphone_names()
+        for i, name in enumerate(mic_list):
+            if "MacBook" in name or "Built-in" in name: mic_idx = i; break
+
+        with sr.Microphone(device_index=mic_idx) as source:
+            self.sig.update_status.emit("CALIBRATING...")
+            rec.adjust_for_ambient_noise(source, duration=1.0)
+            baseline = rec.energy_threshold
+            print(f"✅ Baseline: {baseline}")
+            self.sig.update_status.emit("ONLINE")
+            rec.dynamic_energy_threshold = False
+            rec.pause_threshold = 0.8
+            
+            while True:
+                if not self.mic_active: time.sleep(0.5); continue
+                try:
+                    if pygame.mixer.music.get_busy():
+                        rec.energy_threshold = baseline * 6 
+                        rec.pause_threshold = 0.6
+                    else:
+                        rec.energy_threshold = baseline 
+                        rec.pause_threshold = 0.8
+
+                    audio = rec.listen(source, timeout=None)
+                    try: text = rec.recognize_google(audio).lower()
+                    except: continue
+
+                    if pygame.mixer.music.get_busy():
+                        if any(w in text for w in ["jarvis", "wait", "stop", "hold on", "hey"]):
+                            print(f"🛑 INTERRUPT: {text}")
+                            pygame.mixer.music.stop(); stop_speaking_event.set(); self.sig.stop_speak.emit()
+                            self.sig.update_user.emit(text)
+                            threading.Thread(target=self.run_brain, args=(text,), daemon=True).start()
+                    else:
+                        print(f"👂 Heard: {text}")
+                        self.sig.update_user.emit(text)
+                        threading.Thread(target=self.run_brain, args=(text,), daemon=True).start()
+                    
+                    self.sig.update_status.emit("ONLINE")
+                except: self.sig.update_status.emit("ONLINE")
+
+    # --- BRAIN (RESEARCHER) ---
+    def run_brain(self, text):
+        global conversation_history, last_spoken_text
+        stop_speaking_event.clear()
+        context = ""
+        txt_low = text.lower()
+        
+        # HELPER
+        def clean_query(t):
+            remove_list = ["jarvis", "please", "tell me", "can you", "look up", "find", "search", "news for", "give me", "about", "the", "hello", "create a", "make a", "what are", "yes", "no", "okay", "actually", "just"]
+            for word in remove_list: t = t.replace(word, "")
+            return t.strip()
+
+        # 1. GREETING (CHECK OUTLOOK CALENDAR)
+        if text.lower().strip() in ["hello", "hi", "good morning", "hello jarvis"]:
+             calendar_status = read_outlook_calendar()
+             context += f"\nREAL CALENDAR DATA: {calendar_status}\n"
+             
+        # 2. LOCAL SEARCH
+        if "find file" in txt_low or "search laptop" in txt_low:
+             query = text.replace("find file", "").replace("search laptop", "").strip()
+             result = search_mac_files(query)
+             self.sig.update_ai.emit(f"[Found: {result[:50]}...]")
+             conversation_history.append({"role": "user", "content": f"Found Files: {result}"})
+             
+        # 3. EXCEL / EMAIL
+        elif "excel" in txt_low or "spreadsheet" in txt_low:
+             filename = "Jarvis_Sheet"
+             if "called" in txt_low: filename = text.split("called")[1].split()[0]
+             status = create_excel_sheet(filename, text)
+             self.speak(status); return
+
+        elif "email" in txt_low and ("check" in txt_low or "read" in txt_low):
+             status = read_outlook_emails()
+             self.speak(status); return
+             
+        # 4. RESEARCH / NEWS / SCORES (PRIORITY 1)
+        elif "job" in txt_low or "news" in txt_low or "score" in txt_low or "weather" in txt_low or "who won" in txt_low or "research" in txt_low or "game" in txt_low:
+             if "job" in txt_low and "scan" in txt_low:
+                 query = clean_query(text)
+                 report = perform_job_hunt(query)
+                 self.speak(report); return
+             
+             # FORCE RESEARCH
+             query = clean_query(text)
+             self.sig.update_ai.emit(f"[Searching: {query}...]")
+             research_data = perform_research(query)
+             context += f"\nREAL-TIME WEB DATA: {research_data}\n"
+
+        # 5. DOC WRITER (CHAINED)
+        elif "document" in txt_low or "cover letter" in txt_low or "edit" in txt_low:
+             if "edit" in txt_low or "change" in txt_low or "fix" in txt_low:
+                 self.sig.update_ai.emit("[Editing Last Doc...]")
+                 prompt = [{"role": "system", "content": "Rewrite the document based on feedback. Return ONLY new body text."}, 
+                           {"role": "user", "content": f"Feedback: {text}"}]
+                 try:
+                     resp = client.chat.completions.create(model=MODEL_NAME, messages=prompt)
+                     content = resp.choices[0].message.content
+                     status = edit_existing_doc(content)
+                     self.speak(status); return
+                 except: pass
+                 
+             # RESEARCH + WRITE
+             elif "job" in txt_low or "news" in txt_low or "research" in txt_low:
+                 topic = clean_query(text.replace("document", "").replace("write", ""))
+                 self.sig.update_ai.emit(f"[Gathering Real Data on: {topic}...]")
+                 if "job" in txt_low: real_data = perform_job_hunt(topic) 
+                 else: real_data = perform_research(topic)
+                 
+                 self.sig.update_ai.emit(f"[Writing Doc with Verified Data...]")
+                 prompt = [{"role": "system", "content": "Write a professional document using this REAL data. Do not hallucinate links."}, 
+                           {"role": "user", "content": f"Request: {text}\nREAL DATA: {real_data}"}]
+                 try:
+                     resp = client.chat.completions.create(model=MODEL_NAME, messages=prompt)
+                     content = resp.choices[0].message.content
+                     status = create_word_doc(f"Research_Doc_{int(time.time())}", content)
+                     self.speak(status); return
+                 except: pass
+             else:
+                 topic = text.replace("create", "").replace("document", "").strip()
+                 self.sig.update_ai.emit(f"[Writing Doc: {topic}...]")
+                 prompt = [{"role": "system", "content": "Write a professional document. Return ONLY the body text."}, {"role": "user", "content": f"Topic: {topic}"}]
+                 try:
+                     resp = client.chat.completions.create(model=MODEL_NAME, messages=prompt)
+                     content = resp.choices[0].message.content
+                     status = create_word_doc(f"Doc_{int(time.time())}", content)
+                     self.speak(status); return
+                 except: pass
+
+        # 6. APPS (Fallback)
+        elif "open" in txt_low or "launch" in txt_low:
+            for app in ["cursor", "xcode", "figma", "canva", "linkedin", "google docs", "sheets", "notes", "slack", "espn"]:
+                if app in txt_low:
+                    msg = launch_app(app)
+                    self.speak(msg); return
+
+        # 7. CODE GEN
+        elif "create" in txt_low and "project" in txt_low:
+            project_name = "NewProject"
+            try: project_name = text.split("called")[1].strip().split(" ")[0]
+            except: pass
+            stack = "react" if "react" in txt_low else "swift" if "swift" in txt_low else "python"
+            status = generate_code_project(project_name, stack)
+            self.sig.update_ai.emit(status)
+            self.speak(f"Project {project_name} created."); return
+
+        # 8. RESUME
+        elif any(w in txt_low for w in ["resume", "continue", "go on"]):
+            if last_spoken_text: self.speak(last_spoken_text); return
+
+        # 9. GENERAL SEARCH (Fallback)
+        elif "search" in txt_low:
+             query = clean_query(text)
+             self.sig.update_ai.emit(f"[Searching: {query}...]")
+             context += perform_research(query)
+
+        # 10. LLM
+        conversation_history.append({"role": "user", "content": f"CTX: {context}\nUSER: {text}"})
+        if len(conversation_history) > 6: conversation_history = [conversation_history[0]] + conversation_history[-5:]
+
+        try:
+            resp = client.chat.completions.create(model=MODEL_NAME, messages=conversation_history)
+            reply = resp.choices[0].message.content
+            conversation_history.append({"role": "assistant", "content": reply})
+            last_spoken_text = reply
+            if "[UPDATE_NOTE:" in reply:
+                 m = re.search(r'\[UPDATE_NOTE: (.*?)\]', reply, re.DOTALL)
+                 if m: update_apple_note(m.group(1).strip())
+            self.sig.update_ai.emit(reply)
+            self.speak(reply)
+        except Exception as e: print(f"Error: {e}")
+
+    # --- MOUTH ---
+    def speak(self, text):
+        threading.Thread(target=self._speak_thread, args=(text,), daemon=True).start()
+
+    def _speak_thread(self, text):
+        self.sig.start_speak.emit()
+        clean_text = text.replace("*", "").replace("[", "").replace("]", "")
+        try:
+            subprocess.run(["edge-tts", "--voice", EDGE_VOICE, "--text", clean_text, "--write-media", "temp.mp3"], check=True)
+            if stop_speaking_event.is_set(): self.sig.stop_speak.emit(); return 
+            pygame.mixer.music.load("temp.mp3"); pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                if stop_speaking_event.is_set(): pygame.mixer.music.stop(); self.sig.stop_speak.emit(); return
+                time.sleep(0.1)
+            self.sig.stop_speak.emit()
+        except: self.sig.stop_speak.emit()
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())
+
+
+    
